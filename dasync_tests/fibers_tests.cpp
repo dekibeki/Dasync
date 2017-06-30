@@ -6,7 +6,7 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 #include <string>
 #include <Dasync\fibers.h>
 
-using namespace dasync::fibers;
+using fibers = dasync::fibers<>;
 
 namespace dasync_tests
 {
@@ -15,25 +15,27 @@ public:
 
   /*basic just try and start_thread with no fibers*/
   TEST_METHOD(No_tasks) {
-    init_fibers(1);
-    allow_closure();
+    fibers::init_fibers(1);
+    fibers::allow_closure();
 
-    start_thread(0);
+    fibers::start_thread(0);
   }
 
   /*start_thread with single fiber*/
   TEST_METHOD(Single_task) {
     std::string v;
 
-    Fiber f{ [&v]() {
-      v.push_back('1');} };
+    fibers::Fiber f;
 
-    init_fibers(1);
-    allow_closure();
+    fibers::init_fibers(1);
 
-    run_fiber(f);
+    f.initialize(
+      [&v]() {
+      v.push_back('1');});
 
-    start_thread(0);
+    fibers::allow_closure();
+
+    fibers::start_thread(0);
 
     Assert::AreEqual(v.c_str(), "1");
   }
@@ -42,19 +44,17 @@ public:
   TEST_METHOD(Two_tasks) {
     std::string v;
 
-    Fiber f[]{
-      [&v]() {
-        v.push_back('1');} ,
-      [&v]() {
-        v.push_back('2');}
-    };
+    fibers::Fiber f[2];
 
-    init_fibers(1);
-    allow_closure();
+    fibers::init_fibers(1);
+    fibers::allow_closure();
 
-    run_fibers(f);
-
-    start_thread(0);
+    f[0].initialize([&v]() {
+      v.push_back('1');});
+    f[1].initialize([&v]() {
+      v.push_back('2');});
+    
+    fibers::start_thread(0);
 
     Assert::AreEqual(v.c_str(), "12");
   }
@@ -65,36 +65,32 @@ public:
 
     v.reserve(3);
 
-    Fiber child{ [&v]() {
-      v.push_back('3');} };
+    fibers::Fiber child;
 
-    Fiber parent{ [&v, &child]() {
+    fibers::init_fibers(1);
+    fibers::allow_closure();
+
+    fibers::Fiber parent{ [&v, &child]() {
       v.push_back('1');
-      run_fiber(child);
+      child.initialize([&v]() {
+        v.push_back('3');});
       v.push_back('2');} };
 
-    init_fibers(1);
-    allow_closure();
-
-    run_fiber(parent);
-
-    start_thread(0);
+    fibers::start_thread(0);
 
     Assert::AreEqual(v.c_str(), "123");
   }
 
   /*wait on a counter that's ready*/
   TEST_METHOD(Counter_no_wait) {
-    Fiber f{ []() {
-      Counter counter;
+    fibers::init_fibers(1);
+    fibers::allow_closure();
+
+    fibers::Fiber f{ []() {
+      fibers::Counter counter;
       counter.wait_for(0);} };
 
-    init_fibers(1);
-    allow_closure();
-
-    run_fiber(f);
-
-    start_thread(0);
+    fibers::start_thread(0);
   }
 
   /*fiber creates a child fiber then waits on it using a counter*/
@@ -103,41 +99,38 @@ public:
 
     v.reserve(3);
 
-    Fiber parent{ [&v]() {
+    fibers::init_fibers(1);
+    fibers::allow_closure();
+
+    fibers::Fiber parent{ [&v]() {
       v.push_back('1');
-      Counter counter;
-      Fiber child{ [&v]() {
+      fibers::Counter counter;
+      fibers::Fiber child{ [&v]() {
         v.push_back('2');},&counter };
-      run_fiber(child);
       counter.wait_for(0);
       v.push_back('3');} };
 
-    init_fibers(1);
-    allow_closure();
-
-    run_fiber(parent);
-
-    start_thread(0);
+    fibers::start_thread(0);
 
     Assert::AreEqual(v.c_str(), "123");
   }
 
   /*create 1 fiber through pin_and_run_threads, no fibers*/
   TEST_METHOD(one_thread_no_fibers) {
-    allow_closure();
+    fibers::allow_closure();
 
-    init_fibers(1);
+    fibers::init_fibers(1);
 
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
   }
 
   /*create 2 fibers through pin_and_run_threads, no fibers*/
   TEST_METHOD(two_threads_no_fibers) {
-    allow_closure();
+    fibers::allow_closure();
 
-    init_fibers(2);
+    fibers::init_fibers(2);
 
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
   }
 
   /*create 1 thread through pin_and_run_threads, 1 fiber*/
@@ -145,16 +138,14 @@ public:
     std::string v;
     v.reserve(1);
 
-    allow_closure();
+    fibers::allow_closure();
 
-    init_fibers(1);
+    fibers::init_fibers(1);
 
-    Fiber f1{ [&v]() {
+    fibers::Fiber f1{ [&v]() {
       v.push_back('1');} };
 
-    run_fiber(f1);
-
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
 
     Assert::AreEqual(v.c_str(), "1");
   }
@@ -164,16 +155,14 @@ public:
     std::string v;
     v.reserve(1);
 
-    allow_closure();
+    fibers::allow_closure();
 
-    init_fibers(2);
+    fibers::init_fibers(2);
 
-    Fiber f1{ [&v]() {
+    fibers::Fiber f1{ [&v]() {
       v.push_back('1');} };
 
-    run_fiber(f1);
-
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
 
     Assert::AreEqual(v.c_str(), "1");
   }
@@ -182,16 +171,16 @@ public:
   TEST_METHOD(one_threads_1024_fibers) {
     std::atomic<size_t> counter{ 0 };
 
-    Fiber fibers[1024];
+    fibers::Fiber fibers[1024];
+
+    fibers::allow_closure();
+    fibers::init_fibers(1);
 
     for (size_t i = 0; i < sizeof(fibers) / sizeof(*fibers);++i) {
       fibers[i].initialize([&counter]() {++counter;});
     }
 
-    allow_closure();
-    init_fibers(1);
-    run_fibers(fibers);
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
     Assert::AreEqual(counter.load(), sizeof(fibers) / sizeof(*fibers));
   }
 
@@ -199,16 +188,16 @@ public:
   TEST_METHOD(two_threads_1024_fibers) {
     std::atomic<size_t> counter{ 0 };
 
-    Fiber fibers[1024];
+    fibers::Fiber fibers[1024];
+
+    fibers::allow_closure();
+    fibers::init_fibers(2);
 
     for (size_t i = 0; i < sizeof(fibers) / sizeof(*fibers);++i) {
       fibers[i].initialize([&counter]() {++counter;});
     }
 
-    allow_closure();
-    init_fibers(2);
-    run_fibers(fibers);
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
     Assert::AreEqual(counter.load(), sizeof(fibers) / sizeof(*fibers));
   }
 
@@ -216,27 +205,27 @@ public:
   TEST_METHOD(default_threads_1024_fibers) {
     std::atomic<size_t> counter{ 0 };
 
-    Fiber fibers[1024];
+    fibers::Fiber fibers[1024];
+
+    fibers::allow_closure();
+    fibers::init_fibers();
 
     for (size_t i = 0; i < sizeof(fibers) / sizeof(*fibers);++i) {
       fibers[i].initialize([&counter]() {++counter;});
     }
 
-    allow_closure();
-    init_fibers();
-    run_fibers(fibers);
-    Assert::AreEqual(pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
     Assert::AreEqual(counter.load(), sizeof(fibers) / sizeof(*fibers));
   }
 
   /*create 65 threads through pin_and_run_threads, this should fail as
     not enough cores to pin to*/
   TEST_METHOD(sixtyfive_threads_no_fibers) {
-    allow_closure();
+    fibers::allow_closure();
 
-    init_fibers(65);
+    fibers::init_fibers(65);
 
-    Assert::AreEqual(pin_and_run_threads(), -1);
+    Assert::AreEqual(fibers::pin_and_run_threads(), -1);
   }
   };
 }

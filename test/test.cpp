@@ -4,7 +4,7 @@
 
 #include <Dasync\fibers.h>
 
-using namespace dasync::fibers;
+using fibers = dasync::fibers<>;
 
 struct Assert {
   template<typename T>
@@ -15,21 +15,19 @@ struct Assert {
 
 int main()
 {
-  allow_closure();
+  fibers::allow_closure();
 
   std::atomic<size_t> counter{ 0 };
 
-  Fiber f[4096];
+  fibers::Fiber f[4096];
+
+  fibers::init_fibers();
 
   for (size_t i = 0; i < 4096; ++i) {
     f[i].initialize([&counter]() {for (size_t i = 0; i < 1000;++i)++counter;});
   }
 
-  dasync::fibers::init_fibers();
-
-  dasync::fibers::run_fibers(f);
-
-  Assert::AreEqual(pin_and_run_threads(), 0);
+  Assert::AreEqual(fibers::pin_and_run_threads(), 0);
 
   printf("%zd", counter.load());
 }
