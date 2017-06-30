@@ -121,7 +121,7 @@ public:
 
     fibers::init_fibers(1);
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
   }
 
   /*create 2 fibers through pin_and_run_threads, no fibers*/
@@ -130,7 +130,7 @@ public:
 
     fibers::init_fibers(2);
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
   }
 
   /*create 1 thread through pin_and_run_threads, 1 fiber*/
@@ -145,7 +145,7 @@ public:
     fibers::Fiber f1{ [&v]() {
       v.push_back('1');} };
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
 
     Assert::AreEqual(v.c_str(), "1");
   }
@@ -162,7 +162,7 @@ public:
     fibers::Fiber f1{ [&v]() {
       v.push_back('1');} };
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
 
     Assert::AreEqual(v.c_str(), "1");
   }
@@ -180,7 +180,7 @@ public:
       fibers[i].initialize([&counter]() {++counter;});
     }
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
     Assert::AreEqual(counter.load(), sizeof(fibers) / sizeof(*fibers));
   }
 
@@ -197,7 +197,7 @@ public:
       fibers[i].initialize([&counter]() {++counter;});
     }
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
     Assert::AreEqual(counter.load(), sizeof(fibers) / sizeof(*fibers));
   }
 
@@ -214,18 +214,18 @@ public:
       fibers[i].initialize([&counter]() {++counter;});
     }
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+    Assert::AreEqual(fibers::run_threads(), 0);
     Assert::AreEqual(counter.load(), sizeof(fibers) / sizeof(*fibers));
   }
 
   /*create 65 threads through pin_and_run_threads, this should fail as
     not enough cores to pin to*/
-  TEST_METHOD(sixtyfive_threads_no_fibers) {
+  TEST_METHOD(sixtyfive_pinned_threads_no_fibers) {
     fibers::allow_closure();
 
     fibers::init_fibers(65);
 
-    Assert::AreEqual(fibers::pin_and_run_threads(), -1);
+    Assert::AreEqual(fibers::run_threads(true), -1);
   }
   };
 }

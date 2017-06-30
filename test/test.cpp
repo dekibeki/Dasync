@@ -27,7 +27,7 @@ int main()
     f[i].initialize([&counter]() {for (size_t i = 0; i < 1000;++i)++counter;});
   }
 
-  Assert::AreEqual(fibers::pin_and_run_threads(), 0);
+  Assert::AreEqual(fibers::run_threads(true), 0);
 
   printf("%zd", counter.load());
 }

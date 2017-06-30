@@ -123,7 +123,7 @@ namespace dasync {
     call to init_fibers
 
     return 0 on success, -1 on failure*/
-    static int pin_and_run_threads() {
+    static int run_threads(bool pin_threads = false) {
       std::vector<std::thread> threads;
       threads.reserve(Impl::thread_count);
 
@@ -136,12 +136,15 @@ namespace dasync {
         threads.emplace_back(std::bind(impl::fibers::batch_start_thread<Tag>,
           std::ref(start_mutex), std::ref(good_start), i));
 
-        /*try and pin it*/
-        if (platform_specific::pin_thread(i, threads.back()) != 0) {
-          /*couldn't pin it, wait for them all to close then return*/
-          start_lock.unlock();
-          impl::fibers::join_all(threads);
-          return -1;
+        /*if we should pin it*/
+        if (pin_threads) {
+          /*try and pin it*/
+          if (platform_specific::pin_thread(i, threads.back()) != 0) {
+            /*couldn't pin it, wait for them all to close then return*/
+            start_lock.unlock();
+            impl::fibers::join_all(threads);
+            return -1;
+          }
         }
       }
 
