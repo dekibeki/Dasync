@@ -134,11 +134,13 @@
     <ClInclude Include="fibers_impl.h" />
     <ClInclude Include="fibers_condition_variable.h" />
     <ClInclude Include="fibers_mutex.h" />
+    <ClInclude Include="pipeline.h" />
     <ClInclude Include="platform_specific.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="fibers.cpp" />
     <ClCompile Include="fibers_impl.cpp" />
+    <ClCompile Include="pipeline.cpp" />
     <ClCompile Include="platform_specific_windows.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

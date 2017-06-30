@@ -30,6 +30,9 @@
     <ClInclude Include="fibers_mutex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="pipeline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="platform_specific_windows.cpp">
@@ -39,6 +42,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="fibers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

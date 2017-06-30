@@ -2,9 +2,16 @@
 
 #include <stdio.h>
 
-#include <Dasync\fibers.h>
+#include <Dasync\pipeline.h>
 
-using fibers = dasync::fibers<>;
+template<typename Base>
+struct Test_pipe :
+  protected Base{
+
+  void print(const char* s) {
+    printf("%s", s);
+  }
+};
 
 struct Assert {
   template<typename T>
@@ -15,19 +22,13 @@ struct Assert {
 
 int main()
 {
-  fibers::allow_closure();
+  dasync::Pipeline<Test_pipe> pipeline;
 
-  std::atomic<size_t> counter{ 0 };
+  pipeline.start();
 
-  fibers::Fiber f[4096];
+  pipeline.get_front().print("print front\n");
 
-  fibers::init_fibers();
+  pipeline.get_back().print("print back\n");
 
-  for (size_t i = 0; i < 4096; ++i) {
-    f[i].initialize([&counter]() {for (size_t i = 0; i < 1000;++i)++counter;});
-  }
-
-  Assert::AreEqual(fibers::run_threads(true), 0);
-
-  printf("%zd", counter.load());
+  pipeline.close();
 }
