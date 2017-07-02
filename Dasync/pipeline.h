@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
+#include <cassert>
 
 /*a copy of facebook's wangle's pipelines, but fixed at compile time*/
 
@@ -199,7 +201,7 @@ namespace dasync {
 
         /*forward the first arg to our child, the rest go to the next pipeline*/
         template<typename First, typename ...Rest>
-        Tuple_pipeline(First&&, Rest&&...) :
+        Tuple_pipeline(First&& first, Rest&&... rest) :
           Child{ std::forward<First>(first) },
           Next{ std::forward<Rest>(rest)... } {
 
@@ -208,7 +210,7 @@ namespace dasync {
         /*if given an Empty_pipeline_arg, nothing goes to the child,
           rest go to the next pipeline*/
         template<typename ...Rest>
-        Tuple_pipeline(Empty_pipeline_arg const&, Rest&&...) :
+        Tuple_pipeline(Empty_pipeline_arg const&, Rest&&... rest) :
           Child{},
           Next{ std::forward<Rest>(rest)... } {
 
@@ -232,6 +234,9 @@ namespace dasync {
         Child& get_front() {
           return get_child();
         }
+
+        /*using for the get_back*/
+        using util::Next<Parent_, A, B>::get_back;
 
         /*must be public so our next and previous's child's pipe_bases can access*/
         Child& get_child() {
@@ -290,9 +295,13 @@ namespace dasync {
 
         /*since we are the last, we need to define get_back
         
-          only we define it, so it will be visible*/
-        template<typename T = typename Prev::Child>
-        T& get_back() {
+          only we define it, so it will be visible.
+          
+          A bit of repitition using the inst helper, but it plays nicely
+          with intellisense unlike:
+          template<T = typename Prev::Child> T& get_back() */
+        template<typename T = Prev>
+        util::Inst<util::Tail<B>, Pipe_base<T>>& get_back() {
           /*since we don't allow pipelines with no pipes,
             there must be at least one pipeline before us,
             get it and then its child*/
@@ -322,7 +331,8 @@ namespace dasync {
   extern const Empty_pipeline_arg empty_pipeline_arg;
 
   /*The base of the pipeline, allows for a container of different pipelines*/
-  class Pipeline_base {
+  class Pipeline_base : 
+    public std::enable_shared_from_this<Pipeline_base> {
   public:
     /*start this pipeline*/
     virtual void start() = 0;
@@ -368,11 +378,18 @@ namespace dasync {
 
   /*the user facing side of the pipeline,
   
-  must be given a non-zero amount of pipes*/
+    must be given a non-zero amount of pipes
+  
+    Currently must be created with a std::make_shared. Since pipe local storage is 
+    part of the struct, destroying the struct while a pipe is still closing up may
+    lead to pipes accessing deleted memory. Close could be required to be sync,
+    but is decided against. (Current pipeline implementation does not use the 
+    std::enable_shared_from_this, so this may be done by the user. std::make_shared
+    is safer however).*/
   template<template<typename> class ...Pipes>
   class Pipeline final :
     public Pipeline_base,
-    public impl::pipeline::Tuple_pipeline<Pipeline<Pipes...>, impl::pipeline::Pipe_tuple<Pipes...>> {
+    private impl::pipeline::Tuple_pipeline<Pipeline<Pipes...>, impl::pipeline::Pipe_tuple<Pipes...>> {
   public:
     /*ensures we were given a non-zero amount of pipes*/
     static_assert(impl::pipeline::util::Count_pipes_<Pipes...>::size > 0,
@@ -407,6 +424,10 @@ namespace dasync {
         Pipeline_base::finish_close();
       }
     }
+
+    /*usings to expose the get_front and get_back*/
+    using Internal_pipeline::get_front;
+    using Internal_pipeline::get_back;
 
     /*on destruction, close. If we are already closed this will do nothing
       (see inside close())*/

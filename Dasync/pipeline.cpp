@@ -12,8 +12,10 @@ int dasync::Pipeline_base::start_close() {
 
   /*were we running, so we can close?*/
   if (!std::atomic_compare_exchange_strong(&state_, &expected_state, Pipeline_state::closing)) {
-    /*we we weren't running, we must be either closing or closed (someone got to it before us)*/
-    assert(expected_state == Pipeline_state::closing || expected_state == Pipeline_state::closed);
+    /*we weren't running, we must never have been started, or be either closing or closed (someone got to it before us)*/
+    assert(expected_state == Pipeline_state::initialized 
+      || expected_state == Pipeline_state::closing
+      || expected_state == Pipeline_state::closed);
 
     return -1;
   } else {

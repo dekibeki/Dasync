@@ -13,6 +13,15 @@ struct Test_pipe :
   }
 };
 
+template<typename Base>
+struct Test_pipe2 :
+  protected Base {
+
+  void pipe2_stuff() {
+
+  }
+};
+
 struct Assert {
   template<typename T>
   static void AreEqual(T&& t1, T&& t2) {
@@ -22,13 +31,17 @@ struct Assert {
 
 int main()
 {
-  dasync::Pipeline<Test_pipe> pipeline;
+  using Test_pipeline = dasync::Pipeline<Test_pipe,Test_pipe2>;
 
-  pipeline.start();
+  constexpr size_t pipeline_size = sizeof(Test_pipeline);
 
-  pipeline.get_front().print("print front\n");
+  auto pipeline = std::make_shared<Test_pipeline>();
 
-  pipeline.get_back().print("print back\n");
+  pipeline->start();
 
-  pipeline.close();
+  pipeline->get_front().print("print front\n");
+
+  pipeline->get_back().pipe2_stuff();
+
+  pipeline->close();
 }
