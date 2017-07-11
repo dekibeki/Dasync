@@ -17,7 +17,11 @@ namespace dasync {
       /*declarations*/
       struct Counter;
       struct Thread;
-      struct Fiber;
+      struct Job;
+      struct Globals;
+      struct Ts_globals;
+      template<typename Tag>
+      struct Global_holder;
 
       /*priorities for fibers, higher priorities must have lower numerical value*/
       enum class Priority : size_t {
@@ -33,9 +37,6 @@ namespace dasync {
       /*maximum number of times to try and steal from another thread*/
       constexpr size_t max_steal_tries = 10;
 
-      /*sentinal value for a bad thread index*/
-      constexpr size_t bad_thread_index = std::numeric_limits<size_t>::max();
-
       /*typedef for use of use of the context*/
       using Context = boost::context::execution_context<void>;
 
@@ -44,9 +45,13 @@ namespace dasync {
       using Inter_thread_mutex = std::mutex;
 
       /*typedef of a queue of fibers*/
-      using Fiber_queue = std::deque<Fiber*>;
+      using Job_queue = std::deque<Job*>;
       /*typedef of a stack of threads*/
       using Thread_stack = std::vector<Thread*>;
+      /*typedef a stack of spare contexts*/
+      using Context_stack = std::vector<Context>;
+      /*typedef a stack of unique_locks*/
+      using Lock_stack = std::vector<std::unique_lock<std::mutex>*>;
 
       /*synchronization primitive
 
@@ -61,9 +66,9 @@ namespace dasync {
         /*mutex for this counter*/
         Inter_thread_mutex mut;
         /*the counter*/
-        std::atomic<size_t> count;
+        size_t count;
         /*which fiber is waiting*/
-        std::atomic<Fiber*> waiting;
+        Job* waiting;
         /*what value the fiber is waiting for*/
         size_t waiting_for;
       };
@@ -77,39 +82,33 @@ namespace dasync {
 
         Thread& operator=(Thread const&) = delete;
 
-        /*mutex for the fiber queue*/
+        /*mutex for the job queue*/
         std::mutex queue_mutex;
+
+        /*the queues*/
+        Job_queue ready_queue[static_cast<size_t>(Priority::count_)];
+
         /*condition variable used to sleep on when no fibers in queue and
         trying to steal work failed too many times*/
         std::condition_variable sleep_condition;
-
-        /*the queues*/
-        Fiber_queue ready_queue[static_cast<size_t>(Priority::count_)];
-
-        /*the context of the original caller to start running this scheduler*/
-        Context initial_context;
-
-        /*lock to unlock after scheduling, used for synchronization*/
-        std::unique_lock<Inter_thread_mutex>* unlocking;
-        /*our current fiber*/
-        Fiber* current_fiber;
-        /*our next fiber, used for bookkeeping during a context switch*/
-        Fiber* new_fiber;
       };
 
-      /*A fiber/job/unit of work, etc...*/
-      struct Fiber {
+      /*A job/unit of work, etc...*/
+      struct Job {
 
         /*default constructor, doesn't initialize context to a function,
         so this fiber can't actually be run until a good call to
         initialize*/
-        Fiber();
+        Job();
 
-        /*don't copy/move*/
-        Fiber(Fiber const&) = delete;
-        Fiber(Fiber&&) = delete;
+        /*don't copy,
+          we could move, but the imagined use case doesn't use it, so we remove
+          the possibility for simplicity*/
+        Job(Job const&) = delete;
+        Job(Job&&) = delete;
 
-        Fiber& operator=(Fiber const&) = delete;
+        Job& operator=(Job const&) = delete;
+        Job& operator=(Job&&) = delete;
 
         /*counter that should be decremented when this fiber finishes*/
         Counter* counter;
@@ -117,365 +116,401 @@ namespace dasync {
         Priority priority;
         /*the context of this fiber (stack, etc)*/
         Context context;
+        /*start function*/
+        std::function<void()> start_function;
       };
 
-      /*so hashes can be used in seeding the rngs*/
-      template<typename T>
-      size_t ez_hash(T const& t) {
-        /*make a hasher, hash it, return it*/
-        std::hash<T> hasher;
-
-        return hasher(t);
-      }
-
-      template<typename Tag = Default_tag>
-      struct Impl {
-
-        /*get the priority of the current running fiber, returns Priority::normal if
-          no fiber is currently running */
-        static Priority ts_get_current_priority() {
-          size_t my_index = ts_thread;
-
-          /*if the current thread is registered and has a fiber*/
-          if (my_index < thread_count && threads[my_index].current_fiber) {
-            /* use its priority*/
-            return threads[my_index].current_fiber->priority;
-          }
-          /*otherwise return normal*/
-          return Priority::normal;
-        }
-
-        /*yield the current thread (given by Thread&) and optionaly give a lock to unlock
-          after yielding*/
-        static void yield(Thread& me, std::unique_lock<Inter_thread_mutex>* lock = nullptr) {
-          /*get what we should switch to*/
-          Context switch_to = std::move(schedule(me));
-
-          /*if we shouldn't switch, return without switching*/
-          if (!switch_to) {
-            return;
-          }
-
-          /*set unlocking*/
-          me.unlocking = lock;
-
-          /*do the switch*/
-          Context switch_from = std::move(switch_to());
-
-          const size_t my_index_after = ts_thread;
-
-          assert(my_index_after < thread_count);
-
-          /*we've now switched, call post-switch bookkeeping*/
-          post_schedule(threads[my_index_after], std::move(switch_from));
-        }
-
-        /*get the next context to run*/
-        static Context schedule(Thread& me) {
-          Fiber* to;
-
-          for (;;) {
-            {
-              /*if we have work in our queue, get it*/
-              std::unique_lock<std::mutex> lock{ me.queue_mutex };
-              for (size_t i = 0; i < sizeof(me.ready_queue) / sizeof(decltype(*me.ready_queue));++i) {
-                if (!me.ready_queue[i].empty()) {
-                  to = me.ready_queue[i].front();
-                  me.ready_queue[i].pop_front();
-
-                  lock.unlock();
-
-                  me.new_fiber = to;
-                  return std::move(to->context);
-                }
-              }
-            }
-            /*if we have threads to steal from*/
-            if (thread_count > 1) {
-              /*try to steal max_steal_tries times*/
-              for (size_t i = 0; i < max_steal_tries; ++i) {
-                if ((to = try_steal()) != nullptr) {
-                  me.new_fiber = to;
-                  return std::move(to->context);
-                } else {
-                  std::this_thread::yield();
-                }
-              }
-            }
-
-            {
-              std::unique_lock<std::mutex> lock{ sleep_mutex };
-              /*if there was no work and we can't close, sleep*/
-              if (!can_close) {
-                sleeping_threads.emplace_back(&me);
-
-                me.sleep_condition.wait(lock);
-              } else if (me.initial_context) { /*we can close, we have a valid initial context*/
-                me.new_fiber = nullptr;
-                return std::move(me.initial_context); /*return it*/
-              } else {
-                return Context{}; /*no initial context, so we haven't yet switched, just return*/
-              }
-            }
-          }
-        }
-
-        /*called after every context switch, bookkeeping things*/
-        static void post_schedule(Thread& me, Context&& ctx) {
-          if (me.current_fiber) {
-            if (ctx) {
-              /*we have an old fiber, it didn't close
-              set its context*/
-              me.current_fiber->context = std::move(ctx);
-            } else {
-              //previous fiber just ended, don't do anything
-            }
-          } else { /*no old fiber, we must just be started, save the initial context*/
-            me.initial_context = std::move(ctx);
-          }
-
-          /*if we have something to unlock*/
-          if (me.unlocking) {
-            /*unlock it*/
-            me.unlocking->unlock();
-            me.unlocking = nullptr;
-          }
-          /*set current fiber to our fiber*/
-          me.current_fiber = me.new_fiber;
-        }
-
-        /*try and steal a fiber from a random other thread*/
-        static Fiber* try_steal() {
-          /*we can't steal with only 1 thread*/
-          assert(thread_count > 1);
-
-          size_t my_index = ts_thread;
-
-          /*we can only steal while on a thread running fibers*/
-          assert(my_index < thread_count);
-
-          std::uniform_int_distribution<size_t> distribution{ 0,thread_count - 2 };
-
-          std::mt19937_64& rng = ts_rng;
-
-          /*generate someone to steal from*/
-          size_t stealing_from = distribution(rng);
-
-          if (stealing_from >= my_index) {
-            ++stealing_from;
-          }
-
-          Fiber* to;
-
-          std::unique_lock<std::mutex> lock{ threads[stealing_from].queue_mutex };
-
-          /*check the fibers queues*/
-          for (size_t i = 0; i < queue_count; ++i) {
-            if (!threads[stealing_from].ready_queue[i].empty()) {
-              to = threads[stealing_from].ready_queue[i].back();
-              threads[stealing_from].ready_queue[i].pop_back();
-
-              /*we found something*/
-              return to;
-            }
-          }
-
-          /*we did not find anything*/
-          return nullptr;
-        }
-
-        /*sets a fiber to be runnable
-
-        cannot be called until threads and thread_count have been set
-        (probably through init_fibers)*/
-        static void run_fiber(Fiber& f) {
-          assert(threads);
-
-          Thread* target_thread{ nullptr };
-          bool target_was_sleeping{ false };
-
-          { /*are there any sleeping threads*/
-            std::lock_guard<std::mutex> guard{ sleep_mutex };
-
-            if (!sleeping_threads.empty()) {
-              /*if so get one*/
-              target_thread = sleeping_threads.back();
-              sleeping_threads.pop_back();
-              target_was_sleeping = true;
-            }
-          }
-
-          /*if there were no sleeping threads*/
-          if (!target_thread) {
-            /*can we use ourselves?*/
-            size_t my_index = ts_thread;
-            if (my_index < thread_count) {
-              target_thread = &threads[my_index];
-            } else {
-              std::uniform_int_distribution<size_t> dist{ 0,thread_count - 1 };
-              target_thread = &threads[dist(Impl::ts_rng)];
-            }
-          }
-
-          { /*put the task in its respective queue*/
-            std::lock_guard<std::mutex> guard{ target_thread->queue_mutex };
-            target_thread->ready_queue[static_cast<size_t>(f.priority)].push_back(&f);
-          }
-
-          /*if the thread was sleeping, wake it*/
-          if (target_was_sleeping) {
-            target_thread->sleep_condition.notify_one();
-          }
-        }
-
-        /*wait for a counter to hit i, if it is already below, return immediately*/
-        static void counter_wait_for(Counter& me, size_t i) {
-          /*we've already passed it, no need to wait*/
-          if (me.count <= i) {
-            return;
-          }
-
-          size_t my_thread = ts_thread;
-
-          //cannot be called from thread not running fibers
-          assert(my_thread < thread_count);
-
-          {
-            std::unique_lock<Inter_thread_mutex> lock{ me.mut };
-            //waiting_ is set after waiting_for_
-            //when waiting_ is non-null, we know waiting_for_ is valid
-            me.waiting_for = i;
-            me.waiting = threads[my_thread].current_fiber;
-
-            /*check again, maybe it was changed*/
-            if (me.count <= i) { /*it was changed, just unset ourselves and return*/
-              me.waiting = nullptr;
-              return;
-            }
-            /*it wasn't changed, yield*/
-            yield(threads[my_thread], &lock);
-          }
-        }
-
-        /*decrement the counter and check if any fiber was waiting on what we
-          just decremented it to
-
-          returns nullptr if no fiber was waiting, returns the fiber if one was*/
-        static Fiber* counter_decrement_check(Counter& me) {
-          /*decrement*/
-          size_t cur_count = --me.count;
-
-          /*if there is something waiting*/
-          if (me.waiting) {
-            /*if its waiting for what we just did*/
-            if (me.waiting_for == cur_count) {
-              /*get the lock*/
-              std::unique_lock<Inter_thread_mutex> lock{ me.mut };
-              /*check again*/
-              Fiber* local_waiting;
-              if ((local_waiting = me.waiting) != nullptr) {
-                me.waiting = nullptr;
-                return local_waiting; /*local_waiting was waiting*/
-              }
-            }
-          }
-          return nullptr; /*nothing was waiting*/
-        }
-
-        /*initialize a thread to use this implementation*/
-        template<typename F>
-        static void fiber_initialize(Fiber& me, F&&f,
-          Counter* counter_ = nullptr, Priority priority_ = ts_get_current_priority()) {
-          /*we haven't been initialized yet*/
-          assert(!me.context);
-
-          me.counter = counter_;
-          if (counter_) {
-            ++counter_->count;
-          }
-          me.priority = priority_;
-          me.context = std::move(Context{ [&me,f](Context&& ctx) {
-            return std::move(fiber_entry(std::move(ctx),std::ref(me),f));} });
-        }
-
-        /*the mutex for the sleep stack
-
-          has to be an actual OS mutex. Consider some thread that isn't running fibers
-          preempts a fiber holding the sleep_mutex in a call to run_fiber, and calls
-          run_fiber itself. If this mutex is a spinlock then the preempting thread will
-          spin for its entire time slice as the preempted thread may be pinned to that
-          core*/
-        static  std::mutex sleep_mutex;
-        /*the number of threads being used*/
-        static size_t thread_count;
-        /*an array with pointers to every thread, used in things
-          such as work stealing*/
-        static std::unique_ptr<Thread[]> threads;
+      /*structure to hold all the global state*/
+      struct Globals {
+        /*constructor to initialize global state*/
+        Globals();
+        /*the mutex for the sleep stack. Has to be an actual OS mutex. Consider some
+        thread that isn't running fibers preempts a fiber holding the sleep_mutex in
+        a call to run_fiber, and calls run_fiber itself. If this mutex is a spinlock
+        then the preempting thread will spin for its entire time slice as the preempted
+        thread may be pinned to that core*/
+        std::mutex sleep_mutex;
         /*stack of sleeping threads, prefer recently slept threads when waking*/
-        static Thread_stack sleeping_threads;
+        Thread_stack sleeping;
+
+        /*the number of threads being used*/
+        size_t thread_count;
+        /*an array with pointers to every thread, used in things
+        such as work stealing*/
+        std::unique_ptr<Thread[]> threads;
+
+        /*has to be OS mutex for same reasons as sleep*/
+        std::mutex idle_mutex;
+        /*The stack of spare contexts*/
+        Context_stack idling;
 
         /*whether the threads should close if there is no work left*/
-        static std::atomic<bool> can_close;
-
-        /*thread local storage of the index of the thread structure*/
-        static thread_local size_t ts_thread;
-        /*thread local random number generator*/
-        static thread_local std::mt19937_64 ts_rng;
-
-        /*definition of the fiber entry function*/
-        template<typename F>
-        static Context fiber_entry(Context&& ctx, Fiber& fiber, F&& f) {
-          const size_t start_thread_index = ts_thread;
-
-          /*assert we're running on a thread that is set up to run fibers*/
-          assert(start_thread_index < thread_count);
-
-          /*we've just context switched to here, do post switch bookkeeping*/
-          post_schedule(threads[start_thread_index], std::move(ctx));
-
-          /*call the function*/
-          f();
-
-          const size_t finish_thread_index = ts_thread;
-
-          /*assert we've ended up on a thread that is set up to run fibers*/
-          assert(finish_thread_index < thread_count);
-
-          Fiber* waiting_on_us = nullptr;
-
-          /*if we have a counter*/
-          if (fiber.counter) {
-            /*decrement and check if anyone was waiting*/
-            waiting_on_us = counter_decrement_check(*fiber.counter);
-          }
-
-          /*if someone was waiting, set them to runnable*/
-          if (waiting_on_us) {
-            run_fiber(*waiting_on_us);
-          }
-
-          /*return where to switch to through schedule*/
-          return std::move(schedule(threads[finish_thread_index]));
-        }
+        std::atomic<bool> can_close;
       };
 
-      /*definitions*/
+      /*A structure to hold all the thread_local global state*/
+      struct Ts_globals {
+        /*constructor to initialize thread specific state*/
+        Ts_globals();
+        /*lock for the job queue mutex*/
+        std::unique_lock<std::mutex> queue_lock;
+        /*which thread are we*/
+        Thread* thread;
+        /*thread local random number generator*/
+        std::mt19937_64 rng;
+        /*the context of the original caller to start running this scheduler,
+        also acts as the idle/sleep task*/
+        Context initial_context;
+        /*Where to place the previous context post switch*/
+        Context* prev_context;
+
+        /*current job being run*/
+        Job* cur_job;
+
+        /*locks to unlock after scheduling, used for synchronization*/
+        Lock_stack locks;
+      };
+
+      /*put all globals in a tagged struct as statics to allow for multiple
+        independant copies of the globals (if you want 2 schedulers for example*/
       template<typename Tag>
-      std::mutex Impl<Tag>::sleep_mutex{};
+      struct Global_holder {
+        static Globals globals;
+        static thread_local Ts_globals ts_globals;
+      };
+
+      /*defns for static members*/
       template<typename Tag>
-      size_t Impl<Tag>::thread_count{ 0 };
-      template<typename Tag>
-      std::unique_ptr<Thread[]> Impl<Tag>::threads{};
-      template<typename Tag>
-      std::vector<Thread*> Impl<Tag>::sleeping_threads{};
-      template<typename Tag>
-      std::atomic<bool> Impl<Tag>::can_close{ false };
+      Globals Global_holder<Tag>::globals;
 
       template<typename Tag>
-      thread_local size_t Impl<Tag>::ts_thread{ bad_thread_index };
-      template<typename Tag>
-      thread_local std::mt19937_64 Impl<Tag>::ts_rng{
-        std::chrono::steady_clock::now().time_since_epoch().count() ^ ez_hash(std::this_thread::get_id()) };
+      thread_local Ts_globals Global_holder<Tag>::ts_globals;
+
+      /*try and steal a job from another random thread*/
+      Job* try_steal(Globals& globals, Ts_globals& ts);
+
+      /*get the next job to run*/
+      Job* get_new_job(Globals& globals, Ts_globals& ts);
+
+      /*called after every context switch, bookkeeping things*/
+      void post_switch(Ts_globals& ts, Context&& ctx);
+
+      /*sets a fiber to be runnable
+      cannot be called until threads and thread_count have been set
+      (probably through init_fibers)*/
+      void job_runnable(Globals& globals, Ts_globals& ts, Job& f);
+
+      /*decrement the counter and check if any fiber was waiting on what we
+      just decremented it to
+
+      returns nullptr if no fiber was waiting, returns the fiber if one was*/
+      Job* counter_decrement_check(Counter& me);
+
+      /*set up globals*/
+      void init_globals(Globals& globals, size_t n_threads);
+
+      /*templated functions, these involve switching*/
+
+      /*switch to a particular context:
+      returns the thread_locals for the thread fiber is executing on post switch-back*/
+      template<typename T>
+      Ts_globals& switch_to(Globals& globals, Ts_globals& ts, Context&& ctx_to, Context* prev);
+
+      /*wait for a counter to hit i, if it is already below, return immediately*/
+      template<typename T>
+      void counter_wait_for(Globals& globals, Ts_globals& ts,Counter& me, size_t i);
+
+      /*get a context that is either idle if there some in the stack, or make one*/
+      template<typename T>
+      Context get_idle_context(Globals& globals);
+
+      /*return the context for the fiber to return when we are trying to close*/
+      template<typename T>
+      Context&& get_close_context(Globals& globals, Ts_globals& thread);
+
+      /*yield the current thread (given by Ts_globals&)*/
+      template<typename T>
+      Ts_globals& yield(Globals& globals, Ts_globals& ts);
+
+      /*where a worker fiber starts*/
+      template<typename T>
+      Context fiber_entry(Context&& ctx);
+
+      /*the entry point for a thread running fibers*/
+      template<typename T>
+      void start_thread(size_t i);
+
+      /*starts running the job, and performs proper bookkeeping when it finishes*/
+      template<typename T>
+      Ts_globals& start_job(Globals& globals, Ts_globals& ts);
+
+      /*other templated declerations*/
+
+      /*initialize a job*/
+      template<typename F>
+      void job_initialize(Job& me, F&& f, Counter* counter = nullptr, Priority priority = Priority::normal);
+
+      /*defns*/
+
+      template<typename T>
+      Ts_globals& switch_to(Globals& globals, Ts_globals& ts, Context&& ctx_to, Context* prev) {
+
+        assert(ts.thread);
+
+        ts.prev_context = prev;
+
+        /*SWITCH HAPPENS HERE*/
+        Context old_ctx = std::move(ctx_to());
+        /*SWITCH HAPPENS HERE*/
+
+        /*need to reget ts_globals as we may have been moved to a different thread*/
+
+        Ts_globals& new_ts = T::ts_globals;
+
+        post_switch(new_ts, std::move(old_ctx));
+
+        return new_ts;
+      }
+
+      /*wait for a counter to hit i, if it is already below, return immediately*/
+      template<typename T>
+      void counter_wait_for(Globals& globals, Ts_globals& ts, Counter& me, size_t i) {
+        /*we've already passed it, no need to wait*/
+        std::unique_lock<Inter_thread_mutex> lock{ me.mut };
+
+        if (me.count <= i) {
+          return;
+        }
+
+        /*we're on a proper thread*/
+        assert(ts.thread);
+
+        me.waiting_for = i;
+        me.waiting = ts.cur_job;
+
+        ts.locks.emplace_back(&lock);
+
+        schedule<T>(globals, ts);
+      }
+
+      template<typename T>
+      Ts_globals& schedule(Globals& globals, Ts_globals& ts_) {
+        /*try and get a job*/
+
+        Ts_globals* ts{ &ts_ };
+
+        Job* old_job = ts->cur_job;
+        ts->cur_job = get_new_job(globals, *ts);
+
+        /*what follows is a giant truth table for the following three conditions
+
+          if(ts->cur_job) - we have a new job to run
+
+          if(ts->cur_job->context) - if we have a new job to run, it already has its own
+            context
+
+          if(old_job) - the current context belongs to a job*/
+
+        if (!old_job) {
+          /*as we weren't running a job, we should have no locks*/
+          assert(ts->locks.empty());
+          assert(!ts->queue_lock.owns_lock());
+        }
+
+        if (ts->cur_job && !ts->cur_job->context && !old_job) {
+          /*become the job's context*/
+          return start_job<T>(globals, *ts);
+        } else if (ts->cur_job && !ts->cur_job->context && old_job) {
+          /*get an idle context, switch to it, it will start running the new job*/
+          return switch_to<T>(globals, *ts, std::move(get_idle_context<T>(globals)), &old_job->context);
+        } else if (ts->cur_job && ts->cur_job->context && !old_job) {
+          /*this context then becomes idle when we jump to the job's context*/
+
+          std::unique_lock<std::mutex> idle_lock{ globals.idle_mutex };
+          globals.idling.emplace_back();
+          ts->locks.emplace_back(&idle_lock);
+          ts = &switch_to<T>(globals, *ts, std::move(ts->cur_job->context), &globals.idling.back());
+          /*when we come back from being idle, if we have a cur_job, start it, otherwise return*/
+          if (ts->cur_job) {
+            return start_job<T>(globals, *ts);
+          } else {
+            return *ts;
+          }
+        } else if (ts->cur_job && ts->cur_job->context && old_job) {
+          /*do not idle the current context, switch to the new job */
+           return switch_to<T>(globals, *ts, std::move(ts->cur_job->context), &old_job->context);
+
+        } else if (!ts->cur_job && old_job) {
+          /*we didn't get a job, but this context still belongs to a job
+
+            get an idle context, and jump into that to allow this job to sleep*/
+
+           return switch_to<T>(globals, *ts, std::move(get_idle_context<T>(globals)), &old_job->context);
+
+        } else if (!ts->cur_job && !old_job) {
+          /*sleep this thread*/
+          std::unique_lock<std::mutex> sleep_lock{ globals.sleep_mutex };
+
+          /*there is the possibility that someone put work on our queue between us checking and
+            us locking the sleep mutex, this will need to be fixed in the future*/
+
+          globals.sleeping.emplace_back(ts->thread);
+          ts->thread->sleep_condition.wait(sleep_lock);
+
+          return *ts;
+        } else {
+          /*should never get here*/
+          assert(false);
+          return *ts;
+        }
+      }
+
+      template<typename T>
+      Context get_idle_context(Globals& globals) {
+        Context returning;
+        std::unique_lock<std::mutex> lock{ globals.idle_mutex };
+        if (globals.idling.empty()) {
+          returning = std::move(Context{ fiber_entry<T> });
+          return returning;
+        } else {
+          returning = std::move(globals.idling.back());
+          globals.idling.pop_back();
+          return returning;
+        }
+      }
+
+      template<typename T>
+      Context&& get_close_context(Globals& globals, Ts_globals& ts_) {
+        Ts_globals* ts{ &ts_ };
+
+        /*we must have switched from the initial OS given context to be needing a close context*/
+        assert(ts->initial_context);
+        /*we aren't running a job currently*/
+        assert(!ts->cur_job);
+
+        /*get a job to switch to*/
+        while (1) {
+          ts->cur_job = get_new_job(globals, *ts);
+
+          if (ts->cur_job) {
+            if (ts->cur_job->context) {
+              return std::move(ts->cur_job->context);
+            } else {
+              ts = &start_job<T>(globals, *ts);
+            }
+          } else {
+            std::unique_lock<std::mutex> idle_lock{ globals.idle_mutex };
+
+            if (globals.idling.empty()) {
+              return std::move(ts->initial_context);
+            } else {
+              Context returning = std::move(globals.idling.back());
+              globals.idling.pop_back();
+              return std::move(returning);
+            }
+          }
+        }
+      }
+
+      template<typename T>
+      Ts_globals& yield(Globals& globals, Ts_globals& ts) {
+        /*get what we should switch to*/
+
+        assert(ts.cur_job);
+
+        ts.queue_lock.lock();
+
+        ts.thread->ready_queue[static_cast<size_t>(ts.cur_job->priority)].push_back(
+          ts.cur_job);
+
+        return schedule<T>(globals, ts);
+      }
+
+      template<typename T>
+      Context fiber_entry(Context&& ctx) {
+        /*ease of use*/
+
+        Globals& globals{ T::globals };
+        Ts_globals* ts{ &T::ts_globals };
+
+        post_switch(*ts, std::move(ctx));
+
+        /*as we've just entered, if we have a cur_job, that's for us to run*/
+        if (ts->cur_job) {
+          ts = &start_job<T>(globals, *ts);
+          assert(!ts->cur_job);
+        }
+
+        while (!globals.can_close) {
+          ts = &schedule<T>(globals, *ts);
+        }
+
+        ts->prev_context = nullptr;
+
+        return get_close_context<T>(globals, *ts);
+      }
+
+      /*the entry point for a thread running fibers*/
+      template<typename T>
+      void start_thread(size_t i) {
+        Globals& globals{ T::globals };
+        Ts_globals& ts{ T::ts_globals };
+
+        std::thread::id initial_id{ std::this_thread::get_id() };
+
+        ts.thread = &globals.threads[i];
+
+        switch_to<T>(globals, ts, get_idle_context<T>(globals), &ts.initial_context);
+
+        /*we must end up on the same thread post switch*/
+        assert(initial_id == std::this_thread::get_id());
+
+        /*this thread no longe ris running fibers*/
+        ts.thread = nullptr;
+      }
+
+      template<typename T>
+      Ts_globals& start_job(Globals& globals, Ts_globals& ts_) {
+        
+        Ts_globals* ts{ &ts_ };
+        
+        assert(ts->cur_job);
+        
+        assert(ts->locks.empty());
+        assert(!ts->queue_lock.owns_lock());
+        ts->cur_job->start_function();
+
+        ts = &T::ts_globals;
+
+        assert(ts->locks.empty());
+        assert(!ts->queue_lock.owns_lock());
+
+        if (ts->cur_job->counter) {
+          Job* waiting_job = counter_decrement_check(*ts->cur_job->counter);
+          if (waiting_job) {
+            job_runnable(globals, *ts, *waiting_job);
+          }
+        }
+
+        ts->cur_job = nullptr;
+
+        return *ts;
+      }
+
+      template<typename F>
+      void job_initialize(Job& me, F&&f, Counter* counter, Priority priority) {
+        /*we haven't been initialized yet*/
+        assert(!me.context);
+        assert(!me.counter);
+        assert(!me.start_function);
+
+        me.counter = counter;
+        if (counter) {
+          ++counter->count;
+        }
+        me.priority = priority;
+        me.start_function = std::forward<F>(f);
+      }
     }
   }
 }

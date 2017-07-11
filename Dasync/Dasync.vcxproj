@@ -140,7 +140,9 @@
     <ClInclude Include="platform_specific.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="fibers.cpp" />
+    <ClCompile Include="fibers.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="fibers_impl.cpp" />
     <ClCompile Include="pipeline.cpp" />
     <ClCompile Include="platform_specific_windows.cpp" />

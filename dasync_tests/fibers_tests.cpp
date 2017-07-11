@@ -25,7 +25,7 @@ public:
   TEST_METHOD(Single_task) {
     std::string v;
 
-    fibers::Fiber f;
+    fibers::Job f;
 
     fibers::init_fibers(1);
 
@@ -44,7 +44,7 @@ public:
   TEST_METHOD(Two_tasks) {
     std::string v;
 
-    fibers::Fiber f[2];
+    fibers::Job f[2];
 
     fibers::init_fibers(1);
     fibers::allow_closure();
@@ -65,12 +65,12 @@ public:
 
     v.reserve(3);
 
-    fibers::Fiber child;
+    fibers::Job child;
 
     fibers::init_fibers(1);
     fibers::allow_closure();
 
-    fibers::Fiber parent{ [&v, &child]() {
+    fibers::Job parent{ [&v, &child]() {
       v.push_back('1');
       child.initialize([&v]() {
         v.push_back('3');});
@@ -86,7 +86,7 @@ public:
     fibers::init_fibers(1);
     fibers::allow_closure();
 
-    fibers::Fiber f{ []() {
+    fibers::Job f{ []() {
       fibers::Counter counter;
       counter.wait_for(0);} };
 
@@ -102,10 +102,10 @@ public:
     fibers::init_fibers(1);
     fibers::allow_closure();
 
-    fibers::Fiber parent{ [&v]() {
+    fibers::Job parent{ [&v]() {
       v.push_back('1');
       fibers::Counter counter;
-      fibers::Fiber child{ [&v]() {
+      fibers::Job child{ [&v]() {
         v.push_back('2');},&counter };
       counter.wait_for(0);
       v.push_back('3');} };
@@ -142,7 +142,7 @@ public:
 
     fibers::init_fibers(1);
 
-    fibers::Fiber f1{ [&v]() {
+    fibers::Job f1{ [&v]() {
       v.push_back('1');} };
 
     Assert::AreEqual(fibers::run_threads(), 0);
@@ -159,7 +159,7 @@ public:
 
     fibers::init_fibers(2);
 
-    fibers::Fiber f1{ [&v]() {
+    fibers::Job f1{ [&v]() {
       v.push_back('1');} };
 
     Assert::AreEqual(fibers::run_threads(), 0);
@@ -171,7 +171,7 @@ public:
   TEST_METHOD(one_threads_1024_fibers) {
     std::atomic<size_t> counter{ 0 };
 
-    fibers::Fiber fibers[1024];
+    fibers::Job fibers[1024];
 
     fibers::allow_closure();
     fibers::init_fibers(1);
@@ -188,7 +188,7 @@ public:
   TEST_METHOD(two_threads_1024_fibers) {
     std::atomic<size_t> counter{ 0 };
 
-    fibers::Fiber fibers[1024];
+    fibers::Job fibers[1024];
 
     fibers::allow_closure();
     fibers::init_fibers(2);
@@ -205,7 +205,7 @@ public:
   TEST_METHOD(default_threads_1024_fibers) {
     std::atomic<size_t> counter{ 0 };
 
-    fibers::Fiber fibers[1024];
+    fibers::Job fibers[1024];
 
     fibers::allow_closure();
     fibers::init_fibers();
