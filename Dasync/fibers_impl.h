@@ -12,6 +12,7 @@
 namespace dasync {
   namespace impl {
     namespace fibers {
+
       struct Default_tag;
 
       /*declarations*/
@@ -189,6 +190,9 @@ namespace dasync {
       /*try and steal a job from another random thread*/
       Job* try_steal(Globals& globals, Ts_globals& ts);
 
+      /*check our queue to see if there's anything in there*/
+      Job* try_queue(Ts_globals& ts);
+
       /*get the next job to run*/
       Job* get_new_job(Globals& globals, Ts_globals& ts);
 
@@ -311,57 +315,65 @@ namespace dasync {
 
           if(old_job) - the current context belongs to a job*/
 
-        if (!old_job) {
-          /*as we weren't running a job, we should have no locks*/
-          assert(ts->locks.empty());
-          assert(!ts->queue_lock.owns_lock());
-        }
+        for (;;) {
+          if (!old_job) {
+            /*as we weren't running a job, we should have no locks*/
+            assert(ts->locks.empty());
+            assert(!ts->queue_lock.owns_lock());
+          }
 
-        if (ts->cur_job && !ts->cur_job->context && !old_job) {
-          /*become the job's context*/
-          return start_job<T>(globals, *ts);
-        } else if (ts->cur_job && !ts->cur_job->context && old_job) {
-          /*get an idle context, switch to it, it will start running the new job*/
-          return switch_to<T>(globals, *ts, std::move(get_idle_context<T>(globals)), &old_job->context);
-        } else if (ts->cur_job && ts->cur_job->context && !old_job) {
-          /*this context then becomes idle when we jump to the job's context*/
-
-          std::unique_lock<std::mutex> idle_lock{ globals.idle_mutex };
-          globals.idling.emplace_back();
-          ts->locks.emplace_back(&idle_lock);
-          ts = &switch_to<T>(globals, *ts, std::move(ts->cur_job->context), &globals.idling.back());
-          /*when we come back from being idle, if we have a cur_job, start it, otherwise return*/
-          if (ts->cur_job) {
+          if (ts->cur_job && !ts->cur_job->context && !old_job) {
+            /*become the job's context*/
             return start_job<T>(globals, *ts);
+          } else if (ts->cur_job && !ts->cur_job->context && old_job) {
+            /*get an idle context, switch to it, it will start running the new job*/
+            return switch_to<T>(globals, *ts, std::move(get_idle_context<T>(globals)), &old_job->context);
+          } else if (ts->cur_job && ts->cur_job->context && !old_job) {
+            /*this context then becomes idle when we jump to the job's context*/
+
+            std::unique_lock<std::mutex> idle_lock{ globals.idle_mutex };
+            globals.idling.emplace_back();
+            ts->locks.emplace_back(&idle_lock);
+            ts = &switch_to<T>(globals, *ts, std::move(ts->cur_job->context), &globals.idling.back());
+            /*when we come back from being idle, if we have a cur_job, start it, otherwise return*/
+            if (ts->cur_job) {
+              continue;
+            } else {
+              return *ts;
+            }
+          } else if (ts->cur_job && ts->cur_job->context && old_job) {
+            /*do not idle the current context, switch to the new job */
+            return switch_to<T>(globals, *ts, std::move(ts->cur_job->context), &old_job->context);
+
+          } else if (!ts->cur_job && old_job) {
+            /*we didn't get a job, but this context still belongs to a job
+
+              get an idle context, and jump into that to allow this job to sleep*/
+
+            return switch_to<T>(globals, *ts, std::move(get_idle_context<T>(globals)), &old_job->context);
+
+          } else if (!ts->cur_job && !old_job) {
+            /*sleep this thread*/
+            std::unique_lock<std::mutex> sleep_lock{ globals.sleep_mutex };
+
+            /*try the queue again to see if someone put something on between us trying to sleep and
+              checking the first time*/
+            ts->cur_job = try_queue(*ts);
+
+            if (ts->cur_job) {
+              /*we found something try and run it*/
+              continue;
+            }
+
+            globals.sleeping.emplace_back(ts->thread);
+            ts->thread->sleep_condition.wait(sleep_lock);
+
+            return *ts;
           } else {
+            /*should never get here*/
+            assert(false);
             return *ts;
           }
-        } else if (ts->cur_job && ts->cur_job->context && old_job) {
-          /*do not idle the current context, switch to the new job */
-           return switch_to<T>(globals, *ts, std::move(ts->cur_job->context), &old_job->context);
-
-        } else if (!ts->cur_job && old_job) {
-          /*we didn't get a job, but this context still belongs to a job
-
-            get an idle context, and jump into that to allow this job to sleep*/
-
-           return switch_to<T>(globals, *ts, std::move(get_idle_context<T>(globals)), &old_job->context);
-
-        } else if (!ts->cur_job && !old_job) {
-          /*sleep this thread*/
-          std::unique_lock<std::mutex> sleep_lock{ globals.sleep_mutex };
-
-          /*there is the possibility that someone put work on our queue between us checking and
-            us locking the sleep mutex, this will need to be fixed in the future*/
-
-          globals.sleeping.emplace_back(ts->thread);
-          ts->thread->sleep_condition.wait(sleep_lock);
-
-          return *ts;
-        } else {
-          /*should never get here*/
-          assert(false);
-          return *ts;
         }
       }
 

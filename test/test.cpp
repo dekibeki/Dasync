@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include <Dasync\fibers_impl.h>
+#include <folly\>
 
 int main()
 {

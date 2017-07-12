@@ -96,26 +96,39 @@ dasync::impl::fibers::Job* dasync::impl::fibers::try_steal(Globals& globals, Ts_
   return to;
 }
 
+dasync::impl::fibers::Job* dasync::impl::fibers::try_queue(Ts_globals& ts) {
+
+  Job* returning{ nullptr };
+
+  std::unique_lock<std::mutex> local_lock;
+  /*if we aren't already locked, we need to lock*/
+  if (!ts.queue_lock.owns_lock()) {
+    local_lock = std::move(std::unique_lock<std::mutex>{ts.thread->queue_mutex});
+  }
+  /*if we have work in our queue, get it*/
+  for (size_t i = 0; i < sizeof(ts.thread->ready_queue) / sizeof(*ts.thread->ready_queue);++i) {
+    if (!ts.thread->ready_queue[i].empty()) {
+      returning = ts.thread->ready_queue[i].front();
+      ts.thread->ready_queue[i].pop_front();
+
+      return returning;
+    }
+  }
+  return returning;
+}
+
 dasync::impl::fibers::Job* dasync::impl::fibers::get_new_job(Globals& globals, Ts_globals& ts) {
   /*valid thread*/
   assert(ts.thread);
-  Job* to;
-  { /*scope for the lock*/
-    std::unique_lock<std::mutex> local_lock;
-    /*if we aren't already locked, we need to lock*/
-    if (!ts.queue_lock.owns_lock()) {
-      local_lock = std::move(std::unique_lock<std::mutex>{ts.thread->queue_mutex});
-    }
-    /*if we have work in our queue, get it*/
-    for (size_t i = 0; i < sizeof(ts.thread->ready_queue) / sizeof(*ts.thread->ready_queue);++i) {
-      if (!ts.thread->ready_queue[i].empty()) {
-        to = ts.thread->ready_queue[i].front();
-        ts.thread->ready_queue[i].pop_front();
+  /*first try the queue*/
+  Job* to{ try_queue(ts) };
 
-        return to;
-      }
-    }
+  if (to) {
+    return to;
   }
+
+  /*otherwise try and steal*/
+
   /*if we have threads to steal from*/
   if (globals.thread_count > 1) {
     /*try to steal max_steal_tries times*/
@@ -128,7 +141,8 @@ dasync::impl::fibers::Job* dasync::impl::fibers::get_new_job(Globals& globals, T
     }
   }
 
-  return nullptr;
+  /*to will be nullptr*/
+  return to;
 }
 
 void dasync::impl::fibers::post_switch(Ts_globals& ts, Context&& ctx) {
